@@ -29,6 +29,8 @@ To build and install the software on the Raspberry Pi side, do the following:
 - Run the installer script: `sudo ./install-pi.sh <model>`, where `<model>` is
   `td`, `cp` or `fe` depending on which variant of A314 is used.
 - Reboot the Raspberry Pi: `sudo reboot now`
+- Optionally, make the Raspberry Pi safe to switch off together with the Amiga
+  by following the instructions in [readonly/README.md](readonly/README.md)
 
 ### Amiga
 

@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+#
+# Installed by a314 setup-readonly.sh to /usr/local/sbin.
+#
+# a314-maint status   show whether the system is protected
+# a314-maint rw       writable root and boot partition from next boot (maintenance)
+# a314-maint ro       read-only root and boot partition from next boot (protected)
+
+set -euo pipefail
+
+LOWER=/media/root-ro
+
+if [ -d /boot/firmware ]; then
+	BOOT_FW_DIR=/boot/firmware
+else
+	BOOT_FW_DIR=/boot
+fi
+
+BOOT_RO_SED="\\#[[:space:]]${BOOT_FW_DIR}[[:space:]]# { /defaults,ro[ ,]/! s#defaults#defaults,ro# }"
+BOOT_RW_SED="\\#[[:space:]]${BOOT_FW_DIR}[[:space:]]# s#defaults,ro([ ,])#defaults\\1#"
+
+die() {
+	echo "Error: $*" >&2
+	exit 1
+}
+
+overlay_now() {
+	[ "$(findmnt -no FSTYPE /)" = overlay ]
+}
+
+overlay_next() {
+	grep -q overlayroot=tmpfs "$BOOT_FW_DIR/cmdline.txt"
+}
+
+need_root() {
+	[ "$(id -u)" = 0 ] || die "please run using sudo (sudo a314-maint $1)"
+}
+
+# Edit the fstab of the real root file system. With the overlay active,
+# /etc/fstab is only a copy in RAM, so edit it on the lower file system.
+edit_fstab() {
+	if overlay_now; then
+		mountpoint -q "$LOWER" || die "overlay is active but $LOWER is not mounted"
+		new=$(sed -E "$1" "$LOWER/etc/fstab") && [ -n "$new" ] || die "failed to read $LOWER/etc/fstab"
+		mount -o remount,rw "$LOWER"
+		# Overwrite in place. sed -i would replace the file, and the overlay
+		# keeps the deleted one in use, so remounting read-only fails as busy.
+		rc=0
+		printf '%s\n' "$new" > "$LOWER/etc/fstab" || rc=$?
+		sync
+		mount -o remount,ro "$LOWER" ||
+			echo "Warning: could not remount $LOWER read-only; it will be after the reboot" >&2
+		[ "$rc" = 0 ] || die "failed to edit $LOWER/etc/fstab"
+	else
+		sed -i -E "$1" /etc/fstab
+	fi
+}
+
+ask_reboot() {
+	echo
+	read -r -p "The change takes effect after a reboot. Reboot now? [y/N] " answer
+	case "$answer" in
+		y | Y) systemctl reboot ;;
+	esac
+}
+
+do_status() {
+	if overlay_now; then
+		echo "Root file system:  read-only (RAM overlay)"
+	else
+		echo "Root file system:  WRITABLE (maintenance mode)"
+	fi
+	if overlay_next; then
+		echo "After reboot:      read-only"
+	else
+		echo "After reboot:      WRITABLE"
+	fi
+	if findmnt -no OPTIONS "$BOOT_FW_DIR" | grep -qE '(^|,)ro(,|$)'; then
+		echo "$BOOT_FW_DIR:    read-only"
+	else
+		echo "$BOOT_FW_DIR:    WRITABLE"
+	fi
+	if home=$(findmnt -no SOURCE,OPTIONS /home); then
+		echo "/home:             $home"
+		echo "$home" | grep -qE '(^|[ ,])sync(,|$)' ||
+			echo "                   WARNING: not mounted with sync"
+	else
+		echo "/home:             NOT MOUNTED, changes to /home are not persistent"
+	fi
+	echo "Swap:              $(swapon --show=NAME --noheadings | tr '\n' ' ')"
+}
+
+do_rw() {
+	need_root rw
+	raspi-config nonint do_overlayfs 1
+	edit_fstab "$BOOT_RW_SED"
+	overlay_next && die "failed to disable overlayroot in cmdline.txt"
+	echo "Maintenance mode: root and $BOOT_FW_DIR will be writable after reboot."
+	echo "Remember to shut down properly (sudo poweroff) before switching off the Amiga,"
+	echo "and to run 'sudo a314-maint ro' when done."
+	ask_reboot
+}
+
+do_ro() {
+	need_root ro
+	edit_fstab "$BOOT_RO_SED"
+	raspi-config nonint do_overlayfs 0
+	overlay_next || die "failed to enable overlayroot in cmdline.txt"
+	echo "Protected mode: root and $BOOT_FW_DIR will be read-only after reboot."
+	ask_reboot
+}
+
+case "${1:-}" in
+	status) do_status ;;
+	rw) do_rw ;;
+	ro) do_ro ;;
+	*)
+		echo "Usage: a314-maint status|rw|ro"
+		echo "  status  show whether the file systems are protected"
+		echo "  rw      maintenance mode: writable root and boot partition after reboot"
+		echo "  ro      protected mode: read-only root and boot partition after reboot"
+		exit 1
+		;;
+esac
